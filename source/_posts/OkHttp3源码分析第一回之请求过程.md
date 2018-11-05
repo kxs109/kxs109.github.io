@@ -252,12 +252,141 @@ public synchronized int runningCallsCount() {
   }
 ```
 
-至此，同步请求的过程我们大概明白了。
-```mermaid
-graph LR;
-    OkHttpClient-->|newCall| RealCall;
-    RealCall-->|newRealCall| ;
-    B-->D;
-    C-->D;
+至此，同步请求的过程我们大概明白了。请求执行时在RealCall中直接通过getResponseWithInterceptorChain()执行的，返回的结果也是在创建RealCall的线程中。Dispatcher中只是将请求加入正在运行的同步队列中。请求结束后最终调用finished()方法来移除已经结束的请求。 
+
+## 5. 异步请求enqueue()
+
+跑到Dispatcher类里面去执行异步请求了： 
+
+```java
+@Override public void enqueue(Callback responseCallback) {
+    synchronized (this) {
+      if (executed) throw new IllegalStateException("Already Executed");
+      executed = true;
+    }
+    captureCallStackTrace();
+    eventListener.callStart(this);
+    //调用Dispatcher里面的enqueue方法，并传入一个AsyncCall对象
+    client.dispatcher().enqueue(new AsyncCall(responseCallback));
+  }
 ```
 
+enqueue()里面做了两件事，判断条件合格，将请求加入正在运行的异步队列，否则，将请求加入等待的异步队列。 
+
+```java
+synchronized void enqueue(AsyncCall call) {
+    //如果正在运行的异步队列请求数<64&&同一主机请求数<5,执行下面操作，将当前请求加入正在运行的异步队列，线程池开始执行请求。
+    if (runningAsyncCalls.size() < maxRequests && runningCallsForHost(call) < maxRequestsPerHost) {
+      runningAsyncCalls.add(call);
+      executorService().execute(call);
+    } else {
+      readyAsyncCalls.add(call);
+    }
+  }
+```
+
+先看下AsyncCall类，这是RealCall的内部类： 
+
+```java
+final class AsyncCall extends NamedRunnable {
+    private final Callback responseCallback;
+
+    AsyncCall(Callback responseCallback) {
+      super("OkHttp %s", redactedUrl());
+      this.responseCallback = responseCallback;
+    }
+
+    String host() {
+      return originalRequest.url().host();
+    }
+
+    Request request() {
+      return originalRequest;
+    }
+
+    RealCall get() {
+      return RealCall.this;
+    }
+	//又看到了熟悉的execute()方法
+    @Override protected void execute() {
+      boolean signalledCallback = false;
+      try {
+        //这里跟同步请求一样
+        Response response = getResponseWithInterceptorChain();
+        if (retryAndFollowUpInterceptor.isCanceled()) {
+          signalledCallback = true;
+          responseCallback.onFailure(RealCall.this, new IOException("Canceled"));
+        } else {
+          signalledCallback = true;
+          //这里将response传到回调里面
+          responseCallback.onResponse(RealCall.this, response);
+        }
+      } catch (IOException e) {
+        if (signalledCallback) {
+          // Do not signal the callback twice!
+          Platform.get().log(INFO, "Callback failure for " + toLoggableString(), e);
+        } else {
+          eventListener.callFailed(RealCall.this, e);
+          responseCallback.onFailure(RealCall.this, e);
+        }
+      } finally {
+        //这里也跟同步请求一样调用finished()方法。不过具体执行可不一样。
+        client.dispatcher().finished(this);
+      }
+    }
+  }
+```
+
+调到Disptacher类里面来看finished()方法，与同步不一样的是，这里调用了promoteCalls()方法。其实promoteCalls()方法相当于将结束的请求移除，然后推动下一个请求，直到队列里面没有请求了。 
+
+```java
+void finished(AsyncCall call) {
+    finished(runningAsyncCalls, call, true);
+  }
+
+private <T> void finished(Deque<T> calls, T call, boolean promoteCalls) {
+    int runningCallsCount;
+    Runnable idleCallback;
+    synchronized (this) {
+      if (!calls.remove(call)) throw new AssertionError("Call wasn't in-flight!");
+      //异步请求走了if判断
+      if (promoteCalls) promoteCalls();
+      runningCallsCount = runningCallsCount();
+      idleCallback = this.idleCallback;
+    }
+
+    if (runningCallsCount == 0 && idleCallback != null) {
+      idleCallback.run();
+    }
+  }
+
+private void promoteCalls() {
+    //如果异步队列里面请求数超过64了，return
+    if (runningAsyncCalls.size() >= maxRequests) return;
+    //如果等待的异步队列里面是空的，return
+    if (readyAsyncCalls.isEmpty()) return;
+	//那么异步队列里面请求数不满64&&等待的异步队列里面还有等待的请求，就开始执行下面操作
+    for (Iterator<AsyncCall> i = readyAsyncCalls.iterator(); i.hasNext(); ) {
+      AsyncCall call = i.next();
+	  //如果请求同一个主机数<5,等待队列先remove当前请求，其实就是结束的请求，然后异步队列加入等待队列中的下一个请求，线程池开启一个线程开始执行这个刚加入的请求。
+      if (runningCallsForHost(call) < maxRequestsPerHost) {
+        i.remove();
+        runningAsyncCalls.add(call);
+        executorService().execute(call);
+      }
+
+      if (runningAsyncCalls.size() >= maxRequests) return;
+    }
+  }
+
+private int runningCallsForHost(AsyncCall call) {
+    int result = 0;
+    for (AsyncCall c : runningAsyncCalls) {
+      if (c.get().forWebSocket) continue;
+      if (c.host().equals(call.host())) result++;
+    }
+    return result;
+  }
+```
+
+整个过程其实非常明了了。请求是通过Dispatcher类里面的线程池来推动的，执行一个AsyncCall任务，AsyncCall来执行请求getResponseWithInterceptorChain()，整个请求过程是发生在线程池中的，请求返回的结果是通过ResponseCallback回调传到外面(这里的外面一般指主线程)。请求的时候是先判断条件加入到正在运行的异步队列，请求结束后调用promoteCalls()移除当前结束的线程并还存在下一个请求的条件下，再次调用Dispatcher类里面的线程池推动下一个请求。 
