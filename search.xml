@@ -1,14 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <search>
   <entry>
-    <title><![CDATA[熟练运用Dagger2(一)]]></title>
-    <url>%2F2019%2F03%2F05%2F%E7%86%9F%E7%BB%83%E8%BF%90%E7%94%A8Dagger2(%E4%B8%80)%2F</url>
-    <content type="text"><![CDATA[Dagger2出来好久了，网上好多分析这个框架的文章，但那都是别人头脑的思路写出来的东西，只有融入了自己思想去理解的东西才是真的理解了。其实在Android架构中，这个框架也可以没必要采用。但是还是有必要了解和学习其中的原理。 首先我们要理解依赖注入：类A里面有类B的引用，类A叫依赖类，类B叫目标类。B可以直接在A里面new出来，也可以在A中提供带参数B类型的set(B b)函数将B设置到A类里面。这是我们最常用的依赖注入，代码中到处可见。这两种依赖虽然很常见，但是比如我们要修改B的构造器，那么所有用到的地方都要做修改。Dagger2提供了一种新的依赖方式]]></content>
-      <categories>
-        <category>架构</category>
-      </categories>
-  </entry>
-  <entry>
     <title><![CDATA[是时候来一发Android组件化项目了]]></title>
     <url>%2F2019%2F01%2F03%2F%E6%98%AF%E6%97%B6%E5%80%99%E6%9D%A5%E4%B8%80%E5%8F%91Android%E7%BB%84%E4%BB%B6%E5%8C%96%E9%A1%B9%E7%9B%AE%E4%BA%86%2F</url>
     <content type="text"></content>
